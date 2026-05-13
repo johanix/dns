@@ -39,7 +39,11 @@ func (k *DNSKEY) Generate(bits int) (crypto.PrivateKey, error) {
 			return nil, ErrKeySize
 		}
 	default:
-		return nil, ErrAlg
+		if _, ok := lookupAlgorithm(k.Algorithm); !ok {
+			return nil, ErrAlg
+		}
+		// Registered algorithm validates its own size hint inside
+		// its Generate method.
 	}
 
 	switch k.Algorithm {
@@ -72,7 +76,24 @@ func (k *DNSKEY) Generate(bits int) (crypto.PrivateKey, error) {
 		k.setPublicKeyED25519(pub)
 		return priv, nil
 	default:
-		return nil, ErrAlg
+		impl, ok := lookupAlgorithm(k.Algorithm)
+		if !ok {
+			return nil, ErrAlg
+		}
+		priv, err := impl.Generate(bits)
+		if err != nil {
+			return nil, err
+		}
+		signer, ok := priv.(crypto.Signer)
+		if !ok {
+			return nil, ErrPrivKey
+		}
+		buf, err := impl.PublicKeyToWire(signer.Public())
+		if err != nil {
+			return nil, err
+		}
+		k.PublicKey = toBase64(buf)
+		return priv, nil
 	}
 }
 

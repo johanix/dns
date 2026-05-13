@@ -188,6 +188,18 @@ func (rr *SIG) Verify(k *KEY, buf []byte) error {
 			}
 			return ErrSig
 		}
+	default:
+		if impl, ok := lookupAlgorithm(k.Algorithm); ok {
+			keybuf, err := fromBase64([]byte(k.PublicKey))
+			if err != nil {
+				return ErrKey
+			}
+			pub, err := impl.PublicKeyFromWire(keybuf)
+			if err != nil || pub == nil {
+				return ErrKey
+			}
+			return impl.Verify(pub, hashed, sig)
+		}
 	}
 	return ErrKeyAlg
 }

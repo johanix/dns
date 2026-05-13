@@ -72,6 +72,14 @@ func (r *DNSKEY) PrivateKeyString(p crypto.PrivateKey) string {
 			"PrivateKey: " + private + "\n"
 
 	default:
-		return ""
+		impl, ok := lookupAlgorithm(r.Algorithm)
+		if !ok {
+			return ""
+		}
+		body, err := impl.PrivateKeyToString(p)
+		if err != nil {
+			return ""
+		}
+		return format + "Algorithm: " + algorithm + "\n" + body
 	}
 }

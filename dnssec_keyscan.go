@@ -68,6 +68,9 @@ func (k *DNSKEY) ReadPrivateKey(q io.Reader, file string) (crypto.PrivateKey, er
 	case ED25519:
 		return readPrivateKeyED25519(m)
 	default:
+		if impl, ok := lookupAlgorithm(uint8(algo)); ok {
+			return impl.ReadPrivateKey(m)
+		}
 		return nil, ErrAlg
 	}
 }

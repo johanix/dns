@@ -351,6 +351,9 @@ func sign(k crypto.Signer, hashed []byte, hash crypto.Hash, alg uint8) ([]byte, 
 		signature = append(signature, intToBytes(ecdsaSignature.S, intlen)...)
 		return signature, nil
 	default:
+		if impl, ok := lookupAlgorithm(alg); ok {
+			return impl.SignaturePostProcess(signature)
+		}
 		return nil, ErrAlg
 	}
 }
@@ -481,7 +484,21 @@ func (rr *RRSIG) Verify(k *DNSKEY, rrset []RR) error {
 		return ErrSig
 
 	default:
-		return ErrAlg
+		impl, ok := lookupAlgorithm(rr.Algorithm)
+		if !ok {
+			return ErrAlg
+		}
+		keybuf, err := fromBase64([]byte(k.PublicKey))
+		if err != nil {
+			return ErrKey
+		}
+		pub, err := impl.PublicKeyFromWire(keybuf)
+		if err != nil || pub == nil {
+			return ErrKey
+		}
+		h.Write(signeddata)
+		h.Write(wire)
+		return impl.Verify(pub, h.Sum(nil), sigbuf)
 	}
 }
 
