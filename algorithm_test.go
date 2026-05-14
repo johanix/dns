@@ -123,6 +123,10 @@ func TestRegisterAlgorithm_MapsUpdated(t *testing.T) {
 	if h := AlgorithmToHash[testAlgNum]; h != 0 {
 		t.Errorf("AlgorithmToHash[%d] = %v, want 0", testAlgNum, h)
 	}
+	if num, ok := StringToAlgorithm["TESTALG"]; !ok || num != testAlgNum {
+		t.Errorf("StringToAlgorithm[TESTALG] = %d, ok=%v; want %d, true",
+			num, ok, testAlgNum)
+	}
 }
 
 func TestRegisteredAlgorithm_GenerateAndKeyRoundTrip(t *testing.T) {

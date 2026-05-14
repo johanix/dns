@@ -154,6 +154,11 @@ func RegisterAlgorithm(impl Algorithm) error {
 	algRegistry[num] = impl
 	AlgorithmToString[num] = impl.Name()
 	AlgorithmToHash[num] = impl.Hash()
+	// StringToAlgorithm is the package-level reverse map of
+	// AlgorithmToString; callers (e.g. zone parser, CLI tooling)
+	// look up algorithm numbers by name. Keep it in sync so the
+	// just-registered algorithm is reachable by name.
+	StringToAlgorithm[impl.Name()] = num
 	return nil
 }
 
