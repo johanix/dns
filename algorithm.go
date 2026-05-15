@@ -11,34 +11,29 @@ import (
 )
 
 // Algorithm is the interface implemented by an out-of-tree DNSSEC
-// signature algorithm. Each implementation owns one algorithm number
-// (per IANA "DNS Security Algorithm Numbers" or the private use range
-// in PRIVATEDNS / PRIVATEOID semantics) and provides every per-algorithm
-// hook the library needs.
+// signature algorithm. The codepoint (IANA "DNS Security Algorithm
+// Numbers" or the private use range in PRIVATEDNS / PRIVATEOID
+// semantics) is not part of the Algorithm itself — the application
+// chooses one and binds it at [RegisterAlgorithm] time.
 //
 // Built-in algorithms (RSASHA*, ECDSAP*, ED25519, ED448) are not
 // implemented through this interface — they live in the existing
 // per-algorithm switches and cannot be re-registered.
 //
-// Implementations must be registered with [RegisterAlgorithm] before
-// the algorithm is used. The typical pattern is to register from an
-// init function in a side-effect import:
+// Typical pattern (application init function):
 //
-//	package mldsa44
-//	func init() { dns.RegisterAlgorithm(&impl{}) }
+//	import (
+//	    "github.com/miekg/dns"
+//	    "github.com/johanix/dnssec-algorithms/mldsa44"
+//	)
 //
-//	// In application code:
-//	import _ "github.com/johanix/dnssec-algorithms/mldsa44"
+//	func init() {
+//	    dns.RegisterAlgorithm(199, mldsa44.New())
+//	}
 //
 // All methods may be called concurrently. Methods are expected to be
 // stateless or use their own synchronization.
 type Algorithm interface {
-	// Number returns the IANA DNS Security Algorithm Number for
-	// this algorithm. The value identifies the algorithm on the wire
-	// and in BIND-style private key files. It must be stable across
-	// the process lifetime.
-	Number() uint8
-
 	// Name is the short upper-case name used in private key files
 	// ("Algorithm: <num> (<name>)") and in [AlgorithmToString] output.
 	Name() string
@@ -127,22 +122,22 @@ var (
 	algRegistry   = map[uint8]Algorithm{}
 )
 
-// RegisterAlgorithm wires impl into the dispatch tables. The
-// algorithm becomes usable everywhere the library accepts an
-// [Algorithm] number for sign, verify, key generation, and BIND-style
-// key file parsing.
+// RegisterAlgorithm wires impl into the dispatch tables under the
+// IANA DNS Security Algorithm Number num. The algorithm becomes
+// usable everywhere the library accepts an [Algorithm] number for
+// sign, verify, key generation, and BIND-style key file parsing.
 //
-// The algorithm number returned by impl.Number must not be one
-// implemented by a built-in (ErrAlgBuiltin), and must not already be
-// taken by a previous Register call (ErrAlgRegistered).
+// The caller (typically an application's init function) owns the
+// codepoint choice. num must not be one implemented by a built-in
+// (ErrAlgBuiltin), and must not already be taken by a previous
+// Register call (ErrAlgRegistered).
 //
-// Successful registration also populates [AlgorithmToString] and
-// [AlgorithmToHash] so callers that read those maps directly observe
-// the new algorithm.
+// Successful registration also populates [AlgorithmToString],
+// [AlgorithmToHash], and [StringToAlgorithm] so callers that read
+// those maps directly observe the new algorithm.
 //
 // RegisterAlgorithm is safe to call from multiple init goroutines.
-func RegisterAlgorithm(impl Algorithm) error {
-	num := impl.Number()
+func RegisterAlgorithm(num uint8, impl Algorithm) error {
 	if _, builtin := builtinAlgorithms[num]; builtin {
 		return fmt.Errorf("%w: %d", ErrAlgBuiltin, num)
 	}

@@ -23,7 +23,6 @@ const testAlgNum uint8 = 200
 // the stdlib so the test stays focused on dispatch correctness.
 type testAlg struct{}
 
-func (testAlg) Number() uint8     { return testAlgNum }
 func (testAlg) Name() string      { return "TESTALG" }
 func (testAlg) Hash() crypto.Hash { return 0 }
 
@@ -90,7 +89,7 @@ func (testAlg) SignaturePostProcess(sig []byte) ([]byte, error) {
 
 // Register the test algorithm once at package init.
 var _ = func() bool {
-	if err := RegisterAlgorithm(&testAlg{}); err != nil {
+	if err := RegisterAlgorithm(testAlgNum, &testAlg{}); err != nil {
 		panic("dns: testAlg registration failed: " + err.Error())
 	}
 	return true
@@ -100,17 +99,15 @@ var _ = func() bool {
 // re-registration of a stdlib-implemented algorithm number.
 type shadowAlg struct{ testAlg }
 
-func (shadowAlg) Number() uint8 { return RSASHA256 }
-
 func TestRegisterAlgorithm_BuiltinRejected(t *testing.T) {
-	err := RegisterAlgorithm(&shadowAlg{})
+	err := RegisterAlgorithm(RSASHA256, &shadowAlg{})
 	if !errors.Is(err, ErrAlgBuiltin) {
 		t.Fatalf("got %v, want ErrAlgBuiltin", err)
 	}
 }
 
 func TestRegisterAlgorithm_ConflictRejected(t *testing.T) {
-	err := RegisterAlgorithm(&testAlg{})
+	err := RegisterAlgorithm(testAlgNum, &testAlg{})
 	if !errors.Is(err, ErrAlgRegistered) {
 		t.Fatalf("got %v, want ErrAlgRegistered", err)
 	}
