@@ -12,6 +12,7 @@ import (
 	_ "crypto/sha256" // need its init function
 	_ "crypto/sha512" // need its init function
 	"encoding/asn1"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"math/big"
@@ -150,7 +151,7 @@ func (k *DNSKEY) KeyTag() uint16 {
 		keywire.Protocol = k.Protocol
 		keywire.Algorithm = k.Algorithm
 		keywire.PublicKey = k.PublicKey
-		wire := make([]byte, DefaultMsgSize)
+		wire := make([]byte, max(DefaultMsgSize, keywire.packedLen()))
 		n, err := packKeyWire(keywire, wire)
 		if err != nil {
 			return 0
@@ -188,7 +189,7 @@ func (k *DNSKEY) ToDS(h uint8) *DS {
 	keywire.Protocol = k.Protocol
 	keywire.Algorithm = k.Algorithm
 	keywire.PublicKey = k.PublicKey
-	wire := make([]byte, DefaultMsgSize)
+	wire := make([]byte, max(DefaultMsgSize, keywire.packedLen()))
 	n, err := packKeyWire(keywire, wire)
 	if err != nil {
 		return nil
@@ -754,6 +755,15 @@ func packSigWire(sw *rrsigWireFmt, msg []byte) (int, error) {
 		return off, err
 	}
 	return off, nil
+}
+
+// packedLen returns an upper bound on the wire length of the DNSKEY
+// RDATA (Flags || Protocol || Algorithm || PublicKey). It is used to
+// size scratch buffers that must hold the whole RDATA — notably for
+// large post-quantum public keys, which exceed DefaultMsgSize. The
+// PublicKey is base64; DecodedLen gives an upper bound on its raw size.
+func (dw *dnskeyWireFmt) packedLen() int {
+	return 2 + 1 + 1 + base64.StdEncoding.DecodedLen(len(dw.PublicKey))
 }
 
 func packKeyWire(dw *dnskeyWireFmt, msg []byte) (int, error) {
