@@ -26,6 +26,11 @@ const (
 	SVCB_DOHPATH // rfc9461 Section 5
 	SVCB_OHTTP   // rfc9540 Section 8
 
+	// SVCB_OOTS is an explicit jump to the IANA SvcParamKey number 12; the
+	// preceding constants are iota-sequential and end at SVCB_OHTTP (8).
+	// See draft-johani-dnsop-svcb-oots.
+	SVCB_OOTS SVCBKey = 12
+
 	svcb_RESERVED SVCBKey = 65535
 )
 
@@ -39,8 +44,11 @@ var svcbKeyToStringMap = map[SVCBKey]string{
 	SVCB_IPV6HINT:        "ipv6hint",
 	SVCB_DOHPATH:         "dohpath",
 	SVCB_OHTTP:           "ohttp",
+	SVCB_OOTS:            "oots",
 }
 
+// svcbStringToKeyMap is the reverse (name -> key) lookup, derived from
+// svcbKeyToStringMap, so adding a key above wires both directions.
 var svcbStringToKeyMap = reverseSVCBKeyMap(svcbKeyToStringMap)
 
 func reverseSVCBKeyMap(m map[SVCBKey]string) map[string]SVCBKey {
@@ -205,6 +213,8 @@ func makeSVCBKeyValue(key SVCBKey) SVCBKeyValue {
 		return new(SVCBDoHPath)
 	case SVCB_OHTTP:
 		return new(SVCBOhttp)
+	case SVCB_OOTS:
+		return new(SVCBOots)
 	case svcb_RESERVED:
 		return nil
 	default:
@@ -848,6 +858,184 @@ func (*SVCBOhttp) parse(b string) error {
 		return errors.New("bad svcbotthp: svcbotthp must have no value")
 	}
 	return nil
+}
+
+// svcbOotsKnownProtos is the set of "oots" transport protocol identifiers
+// recognized by this implementation (draft-johani-dnsop-svcb-oots). An entry
+// whose identifier is not in this set is ignored on both decode and parse,
+// never treated as an error.
+var svcbOotsKnownProtos = map[string]bool{
+	"do53": true, // DNS over UDP/TCP (traditional, port 53)
+	"dot":  true, // DNS over TLS (RFC 7858)
+	"doh":  true, // DNS over HTTPS (RFC 8484)
+	"doq":  true, // DNS over QUIC (RFC 9250)
+}
+
+// SVCBOotsEntry is a single (proto, weight) entry of an "oots" SvcParamValue.
+// Weight is the operator's confidence, expressed as a percentage in the range
+// [0, 100], that it can serve the nameserver's total query load over the given
+// transport. The per-transport weights are independent capability estimates,
+// not a distribution across transports.
+type SVCBOotsEntry struct {
+	Proto  string
+	Weight uint8
+}
+
+// SVCBOots pair carries the "oots" ("Opportunistic Operator-led Transport
+// Signal") SvcParamKey (IANA SvcParamKey 12), defined in
+// draft-johani-dnsop-svcb-oots. It advertises, per DNS transport protocol, the
+// operator's assessment of the share of the nameserver's total query load that
+// it is confident it can serve over that transport, as a percentage.
+//
+// The weights are independent capability estimates rather than a distribution:
+// more than one transport may carry a weight of 100, and the weights in a
+// single value typically sum to more than 100. Recognized protocol identifiers
+// are "do53", "dot", "doh" and "doq"; an entry with any other identifier is
+// ignored. Each identifier MUST appear at most once. The order of entries is
+// not significant.
+//
+// Note on default interpretations (a consumer rule, not enforced by this
+// codec): absence of a recognized entry means weight 0 for "dot", "doh" and
+// "doq", but weight 100 for "do53" (traditional DNS is assumed available unless
+// an explicit do53 entry with weight 0 says otherwise). Per the draft, an
+// "oots" value MUST also be ignored when it appears in an AliasMode SVCB record
+// (Priority == 0); that too is the caller's responsibility.
+//
+// Basic use pattern for creating an oots option:
+//
+//	s := new(dns.SVCB)
+//	s.Hdr = dns.RR_Header{Name: ".", Rrtype: dns.TypeSVCB, Class: dns.ClassINET}
+//	e := new(dns.SVCBOots)
+//	e.Oots = []dns.SVCBOotsEntry{{Proto: "do53", Weight: 100}, {Proto: "dot", Weight: 10}}
+//	s.Value = append(s.Value, e)
+type SVCBOots struct {
+	Oots []SVCBOotsEntry
+}
+
+func (*SVCBOots) Key() SVCBKey { return SVCB_OOTS }
+
+func (s *SVCBOots) len() int {
+	var l int
+	for _, e := range s.Oots {
+		// 1-octet length prefix + proto octets + 1-octet weight.
+		l += 2 + len(e.Proto)
+	}
+	return l
+}
+
+func (s *SVCBOots) String() string {
+	str := make([]string, len(s.Oots))
+	for i, e := range s.Oots {
+		str[i] = e.Proto + ":" + strconv.FormatUint(uint64(e.Weight), 10)
+	}
+	return strings.Join(str, ",")
+}
+
+func (s *SVCBOots) pack() ([]byte, error) {
+	b := make([]byte, 0, s.len())
+	for _, e := range s.Oots {
+		if e.Proto == "" {
+			return nil, errors.New("bad svcboots: empty protocol identifier")
+		}
+		if len(e.Proto) > 255 {
+			return nil, errors.New("bad svcboots: protocol identifier too long")
+		}
+		// An encoder MUST NOT emit a weight greater than 100; clamp rather than
+		// fail so a valid wire value is always produced.
+		w := e.Weight
+		if w > 100 {
+			w = 100
+		}
+		b = append(b, byte(len(e.Proto)))
+		b = append(b, e.Proto...)
+		b = append(b, w)
+	}
+	return b, nil
+}
+
+func (s *SVCBOots) unpack(b []byte) error {
+	// The SvcParamValue contains at least one entry (N >= 1).
+	if len(b) == 0 {
+		return errors.New("bad svcboots: value must contain at least one entry")
+	}
+	// Smallest entry is 3 octets (length 1 + 1 proto octet + 1 weight octet).
+	oots := make([]SVCBOotsEntry, 0, len(b)/3)
+	seen := make(map[string]bool)
+	for i := 0; i < len(b); {
+		length := int(b[i])
+		// The length octet L satisfies 1 <= L <= 255.
+		if length == 0 {
+			return errors.New("bad svcboots: zero-length protocol identifier")
+		}
+		i++
+		// Need L octets of proto followed by one weight octet.
+		if i+length+1 > len(b) {
+			return errors.New("bad svcboots: entry overflowing value")
+		}
+		proto := string(b[i : i+length])
+		i += length
+		weight := b[i]
+		i++
+		// Each protocol identifier string MUST NOT appear more than once; a
+		// duplicate makes the enclosing SVCB RR malformed.
+		if seen[proto] {
+			return errors.New("bad svcboots: duplicate protocol identifier")
+		}
+		seen[proto] = true
+		// An unrecognized identifier is ignored; the remaining entries are
+		// independent and continue to be processed.
+		if !svcbOotsKnownProtos[proto] {
+			continue
+		}
+		// A weight octet greater than 100 MUST be interpreted as 100; it is
+		// never grounds for treating the entry or the RR as malformed.
+		if weight > 100 {
+			weight = 100
+		}
+		oots = append(oots, SVCBOotsEntry{Proto: proto, Weight: weight})
+	}
+	s.Oots = oots
+	return nil
+}
+
+func (s *SVCBOots) parse(b string) error {
+	if b == "" {
+		return errors.New("bad svcboots: value must contain at least one entry")
+	}
+	oots := make([]SVCBOotsEntry, 0, strings.Count(b, ",")+1)
+	seen := make(map[string]bool)
+	for len(b) > 0 {
+		var entry string
+		entry, b, _ = strings.Cut(b, ",")
+		proto, weightStr, ok := strings.Cut(entry, ":")
+		// A malformed entry (missing colon, or an absent/empty protocol) is a
+		// parse error for the enclosing SvcParam.
+		if !ok || proto == "" {
+			return errors.New("bad svcboots: entry is not proto:weight")
+		}
+		// weight is a decimal integer in the range [0, 100]; anything else
+		// (non-decimal, or out of range) is a parse error.
+		weight, err := strconv.ParseUint(weightStr, 10, 8)
+		if err != nil || weight > 100 {
+			return errors.New("bad svcboots: weight is not a decimal integer in [0, 100]")
+		}
+		// Each protocol identifier string MUST NOT appear more than once.
+		if seen[proto] {
+			return errors.New("bad svcboots: duplicate protocol identifier")
+		}
+		seen[proto] = true
+		// An unrecognized identifier is ignored; processing continues.
+		if !svcbOotsKnownProtos[proto] {
+			continue
+		}
+		oots = append(oots, SVCBOotsEntry{Proto: proto, Weight: uint8(weight)})
+	}
+	s.Oots = oots
+	return nil
+}
+
+func (s *SVCBOots) copy() SVCBKeyValue {
+	return &SVCBOots{cloneSlice(s.Oots)}
 }
 
 // SVCBLocal pair is intended for experimental/private use. The key is recommended
