@@ -16,9 +16,11 @@ import (
 // semantics) is not part of the Algorithm itself — the application
 // chooses one and binds it at [RegisterAlgorithm] time.
 //
-// Built-in algorithms (RSASHA*, ECDSAP*, ED25519, ED448) are not
+// Built-in algorithms (RSASHA*, ECDSAP*, ED25519) are not
 // implemented through this interface — they live in the existing
-// per-algorithm switches and cannot be re-registered.
+// per-algorithm switches and cannot be re-registered. ED448 is named
+// (the constant and its string) but not implemented, so codepoint 16
+// is free to register, e.g. with github.com/johanix/dnssec-algorithms/ed448.
 //
 // Typical pattern (application init function):
 //
@@ -95,7 +97,7 @@ var (
 	ErrAlgRegistered = fmt.Errorf("dns: algorithm number already registered")
 
 	// ErrAlgBuiltin indicates the algorithm number is implemented
-	// by the library itself (RSASHA*, ECDSAP*, ED25519, ED448) and
+	// by the library itself (RSASHA*, ECDSAP*, ED25519) and
 	// cannot be overridden through the registry.
 	ErrAlgBuiltin = fmt.Errorf("dns: algorithm number is built-in")
 )
