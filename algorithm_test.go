@@ -106,6 +106,16 @@ func TestRegisterAlgorithm_BuiltinRejected(t *testing.T) {
 	}
 }
 
+// ED448 is named but not implemented by the library, so codepoint 16 must
+// stay registrable: github.com/johanix/dnssec-algorithms/ed448 registers it,
+// and tdns does so in every binary. Adding ED448 to builtinAlgorithms without
+// an implementation would make that registration fail at init.
+func TestRegisterAlgorithm_ED448NotBuiltin(t *testing.T) {
+	if _, builtin := builtinAlgorithms[ED448]; builtin {
+		t.Fatal("ED448 is in builtinAlgorithms; codepoint 16 can no longer be registered")
+	}
+}
+
 func TestRegisterAlgorithm_ConflictRejected(t *testing.T) {
 	err := RegisterAlgorithm(testAlgNum, &testAlg{})
 	if !errors.Is(err, ErrAlgRegistered) {
