@@ -141,7 +141,9 @@ func (k *DNSKEY) KeyTag() uint16 {
 		// Look at the bottom two bytes of the modules, which the last item in the pubkey.
 		// See https://www.rfc-editor.org/errata/eid193 .
 		modulus, _ := fromBase64([]byte(k.PublicKey))
-		if len(modulus) > 1 {
+		// The tag is read from the key's last three bytes; a shorter key
+		// has no tag (and slicing it would panic), so it gets 0.
+		if len(modulus) > 2 {
 			x := binary.BigEndian.Uint16(modulus[len(modulus)-3:])
 			keytag = int(x)
 		}
