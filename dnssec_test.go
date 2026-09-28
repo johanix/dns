@@ -991,3 +991,28 @@ func TestRSAMD5KeyTag(t *testing.T) {
 		t.Errorf("expected %d, got %d, as keytag for rr2", exp, x)
 	}
 }
+
+// A DNSKEY for RSAMD5 whose public key is shorter than three bytes has no
+// key tag. KeyTag and ToDS must return 0 and nil for it, not panic.
+func TestRSAMD5KeyTagShortKey(t *testing.T) {
+	for _, pub := range []string{"", "AA==", "AAA="} {
+		k := &DNSKEY{
+			Hdr:       RR_Header{Name: "x.", Rrtype: TypeDNSKEY, Class: ClassINET, Ttl: 3600},
+			Flags:     256,
+			Protocol:  3,
+			Algorithm: RSAMD5,
+			PublicKey: pub,
+		}
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("KeyTag panicked on a %q public key: %v", pub, r)
+				}
+			}()
+			if tag := k.KeyTag(); tag != 0 {
+				t.Errorf("KeyTag(%q) = %d, want 0", pub, tag)
+			}
+			_ = k.ToDS(SHA256)
+		}()
+	}
+}

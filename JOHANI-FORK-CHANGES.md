@@ -103,6 +103,21 @@ below corresponds to one logical change on that list.
   absence-default rules (`do53` → 100, others → 0) and "ignore in AliasMode" are
   consumer rules and are documented on `SVCBOots` but not enforced by the codec.
 
+## 5. RSAMD5 key tag: no panic on a key shorter than three bytes
+
+- **Implemented:** 2026-09-28
+- **Commits:** `2e351da0` (released as `v1.1.72-johanix.3`)
+- **Files / symbols:** `dnssec.go` `(*DNSKEY).KeyTag` (the RSAMD5 branch:
+  `len(modulus) > 1` becomes `> 2`); test `TestRSAMD5KeyTagShortKey` in
+  `dnssec_test.go`.
+- **Why:** the RSAMD5 branch reads the tag from the last three bytes of the
+  public key. With fewer than three bytes the slice started at -1, so
+  `KeyTag`, and `ToDS` through it, panicked on such a DNSKEY. Any program that
+  computes tags for DNSKEYs it did not create could be stopped by one record.
+  Such a key now gets tag 0, as `KeyTag` returns for any key it cannot handle.
+  Upstream removed the RSAMD5 branch altogether in v1.1.73 (#1724); this fork,
+  on v1.1.72, keeps it for RFC 4034 B.1 and only guards the length.
+
 ---
 
 ## Appending to this document
