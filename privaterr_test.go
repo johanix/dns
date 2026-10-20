@@ -1,6 +1,8 @@
 package dns_test
 
 import (
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -165,4 +167,52 @@ func TestPrivateZoneParser(t *testing.T) {
 	if err := z.Err(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+const TypePARSEFAIL uint16 = 0xFF02
+
+var errParseFail = errors.New("rdata rejected by Parse")
+
+// PARSEFAIL is a private RR type whose Parse always fails.
+type PARSEFAIL struct{ ISBN }
+
+func NewParseFail() dns.PrivateRdata { return &PARSEFAIL{} }
+
+func (rd *PARSEFAIL) Parse(txt []string) error {
+	return fmt.Errorf("bad value %q: %w", strings.Join(txt, " "), errParseFail)
+}
+
+func TestPrivateParseError(t *testing.T) {
+	dns.PrivateHandle("PARSEFAIL", TypePARSEFAIL, NewParseFail)
+	defer dns.PrivateHandleRemove(TypePARSEFAIL)
+
+	check := func(t *testing.T, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatal("expected an error")
+		}
+		if !strings.Contains(err.Error(), errParseFail.Error()) {
+			t.Errorf("error %q does not contain %q", err, errParseFail)
+		}
+		if !errors.Is(err, errParseFail) {
+			t.Errorf("errors.Is(%q, errParseFail) = false", err)
+		}
+	}
+
+	t.Run("NewRR", func(t *testing.T) {
+		_, err := dns.NewRR("example.org. 3600 IN PARSEFAIL foo")
+		check(t, err)
+	})
+
+	t.Run("ZoneParser", func(t *testing.T) {
+		zone := "$ORIGIN example.org.\nwww 3600 IN PARSEFAIL foo\n"
+		z := dns.NewZoneParser(strings.NewReader(zone), "", "example.org.zone")
+		for _, ok := z.Next(); ok; _, ok = z.Next() {
+		}
+		err := z.Err()
+		check(t, err)
+		if err != nil && !strings.HasPrefix(err.Error(), "example.org.zone: ") {
+			t.Errorf("error %q does not start with the file name", err)
+		}
+	})
 }

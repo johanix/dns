@@ -272,6 +272,13 @@ func (zp *ZoneParser) setParseError(err string, l lex) (RR, bool) {
 	return nil, false
 }
 
+// setParseErrorFrom is like setParseError, but keeps the text and the wrapped
+// error of err.
+func (zp *ZoneParser) setParseErrorFrom(err *ParseError, l lex) (RR, bool) {
+	zp.parseErr = &ParseError{file: zp.file, err: err.err, wrappedErr: err.wrappedErr, lex: l}
+	return nil, false
+}
+
 // Comment returns an optional text comment that occurred alongside
 // the RR.
 func (zp *ZoneParser) Comment() string {
@@ -486,7 +493,7 @@ func (zp *ZoneParser) Next() (RR, bool) {
 			}
 
 			if err := slurpRemainder(zp.c); err != nil {
-				return zp.setParseError(err.err, err.lex)
+				return zp.setParseErrorFrom(err, err.lex)
 			}
 
 			ttl, ok := stringToTTL(l.token)
@@ -509,7 +516,7 @@ func (zp *ZoneParser) Next() (RR, bool) {
 			}
 
 			if err := slurpRemainder(zp.c); err != nil {
-				return zp.setParseError(err.err, err.lex)
+				return zp.setParseErrorFrom(err, err.lex)
 			}
 
 			name, ok := toAbsoluteName(l.token, zp.origin)
@@ -659,7 +666,7 @@ func (zp *ZoneParser) Next() (RR, bool) {
 				// This is a dynamic update rr.
 
 				if err := slurpRemainder(zp.c); err != nil {
-					return zp.setParseError(err.err, err.lex)
+					return zp.setParseErrorFrom(err, err.lex)
 				}
 
 				return rr, true
@@ -674,16 +681,16 @@ func (zp *ZoneParser) Next() (RR, bool) {
 
 			if err := parseAsRR.parse(zp.c, zp.origin); err != nil {
 				// err is a concrete *ParseError without the file field set.
-				// The setParseError call below will construct a new
+				// The setParseErrorFrom call below will construct a new
 				// *ParseError with file set to zp.file.
 
 				// err.lex may be nil in which case we substitute our current
 				// lex token.
 				if err.lex == (lex{}) {
-					return zp.setParseError(err.err, l)
+					return zp.setParseErrorFrom(err, l)
 				}
 
-				return zp.setParseError(err.err, err.lex)
+				return zp.setParseErrorFrom(err, err.lex)
 			}
 
 			if parseAsRFC3597 {
