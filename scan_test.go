@@ -483,3 +483,31 @@ func TestEscapedStringOffset(t *testing.T) {
 		}
 	}
 }
+
+func TestParseWrappedErrorKept(t *testing.T) {
+	// These RR types return a *ParseError that only wraps another error.
+	// The reason must survive ZoneParser.Next.
+	tests := []struct {
+		rr   string
+		want string
+	}{
+		{"example.org. IN IPSECKEY 10 1 2 not-an-ip AQNRU3mG7TVTO2BkR47usntb102uFJtugbo6BSGvgqt4AQ==", "IPSECKEY"},
+		{"example.org. IN AMTRELAY 10 0 1 not-an-ip", "AMTRELAY"},
+		{"example.org. IN APL x:192.0.2.0/24", "failed to parse APL family"},
+		{"example.org. IN APL 1:not-an-ip/24", "failed to parse APL address"},
+		{"example.org. IN SVCB 1 . port=not-a-port", "bad svcbport"},
+	}
+	for _, tc := range tests {
+		_, err := NewRR(tc.rr)
+		if err == nil {
+			t.Errorf("%q: expected an error", tc.rr)
+			continue
+		}
+		if !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%q: error %q does not contain %q", tc.rr, err, tc.want)
+		}
+		if errors.Unwrap(err) == nil {
+			t.Errorf("%q: error %q wraps nothing", tc.rr, err)
+		}
+	}
+}
