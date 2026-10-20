@@ -118,6 +118,25 @@ below corresponds to one logical change on that list.
   Upstream removed the RSAMD5 branch altogether in v1.1.73 (#1724); this fork,
   on v1.1.72, keeps it for RFC 4034 B.1 and only guards the length.
 
+## 6. Zone parser keeps the reason of a wrapped `ParseError`
+
+- **Implemented:** 2026-10-20
+- **Commits:** `61d38f8c` (released as `v1.1.72-johanix.4`)
+- **Files / symbols:** `scan.go`: new `(*ZoneParser).setParseErrorFrom`, used
+  in `(*ZoneParser).Next` wherever it rebuilt a `ParseError` from `err.err`
+  alone (the rdata parse and the three `slurpRemainder` checks). Tests
+  `TestPrivateParseError` in `privaterr_test.go` and
+  `TestParseWrappedErrorKept` in `scan_test.go`.
+- **Why:** since v1.1.58 (#1526), `PrivateRR.parse` and the IPSECKEY,
+  AMTRELAY, APL and SVCB value parsers return a `ParseError` that holds its
+  reason only in `wrappedErr`. `Next` rebuilt that error from the empty `err`
+  string to add the file name, and dropped `wrappedErr`. So `NewRR` and zone
+  files reported `dns: : "\n" at line: 1:N` with no reason, and
+  `errors.Unwrap` returned nil; every `Parse` error of a private RR type was
+  unreadable. `setParseErrorFrom` copies both fields: the message shows the
+  reason, and `errors.Is` / `errors.As` reach it. Upstream master (v1.1.73)
+  still has the bug; the same commit applies there unchanged.
+
 ---
 
 ## Appending to this document
