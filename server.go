@@ -65,6 +65,19 @@ type ConnectionStater interface {
 	ConnectionState() *tls.ConnectionState
 }
 
+// A RawRequester is a ResponseWriter that can return the request as it was
+// read from the wire. A SIG(0) transaction signature (RFC 2931) covers the
+// message as sent, so a handler that verifies one needs those bytes: packing
+// the parsed *Msg again gives different bytes whenever the sender compressed
+// names differently, and the signature then fails.
+//
+// The server keeps the bytes only for a request whose last additional record
+// is a SIG, and RawRequest returns nil for every other request. The slice is
+// the handler's own copy and is never reused by the server.
+type RawRequester interface {
+	RawRequest() []byte
+}
+
 type response struct {
 	closed         bool // connection has been closed
 	hijacked       bool // connection has been hijacked by handler
@@ -72,6 +85,7 @@ type response struct {
 	tsigStatus     error
 	tsigRequestMAC string
 	tsigProvider   TsigProvider
+	rawRequest     []byte         // the request as read, when it ends in a SIG RR (RawRequester)
 	udp            net.PacketConn // i/o connection if UDP was used
 	tcp            net.Conn       // i/o connection if TCP was used
 	udpSession     *SessionUDP    // oob data to get egress interface right
@@ -676,6 +690,14 @@ func (srv *Server) serveDNS(m []byte, w *response) {
 		}
 	}
 
+	// A SIG(0) is verified over the request as sent (RawRequester). Copied,
+	// since a UDP buffer goes back to the pool below; and only for a request
+	// that ends in a SIG, so other requests cost nothing.
+	w.rawRequest = nil
+	if n := len(req.Extra); n > 0 && req.Extra[n-1].Header().Rrtype == TypeSIG {
+		w.rawRequest = append([]byte(nil), m...)
+	}
+
 	if w.udp != nil && cap(m) == srv.UDPSize {
 		srv.udpPool.Put(m[:srv.UDPSize])
 	}
@@ -822,6 +844,9 @@ func (w *response) RemoteAddr() net.Addr {
 
 // TsigStatus implements the ResponseWriter.TsigStatus method.
 func (w *response) TsigStatus() error { return w.tsigStatus }
+
+// RawRequest implements the RawRequester interface.
+func (w *response) RawRequest() []byte { return w.rawRequest }
 
 // TsigTimersOnly implements the ResponseWriter.TsigTimersOnly method.
 func (w *response) TsigTimersOnly(b bool) { w.tsigTimersOnly = b }

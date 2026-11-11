@@ -137,6 +137,28 @@ below corresponds to one logical change on that list.
   reason, and `errors.Is` / `errors.As` reach it. Upstream master (v1.1.73)
   still has the bug; the same commit applies there unchanged.
 
+## 7. `RawRequester`: the request as received, for SIG(0)
+
+- **Implemented:** 2026-11-11
+- **Commits:** `1740a09b` (to be released as `v1.1.72-johanix.5`)
+- **Files / symbols:** `server.go`: new interface `RawRequester`
+  (`RawRequest() []byte`); field `response.rawRequest`, set in
+  `(*Server).serveDNS`; method `(*response).RawRequest`. Tests
+  `TestRawRequestKeepsSignedRequestAsSent` and `TestRawRequestNilWithoutSIG`
+  in `server_rawrequest_test.go`.
+- **Why:** a SIG(0) signature (RFC 2931) covers the request as sent, and
+  `(*SIG).Verify` needs those bytes. The server verifies TSIG itself over the
+  bytes it read, but it hands a handler only the parsed `*Msg`, so a handler
+  that verifies SIG(0) could only pack the message again. A re-pack differs
+  whenever the sender compressed names differently: BIND's `nsupdate -k`
+  compresses, so its SIG(0) never verified. `serveDNS` now keeps a copy of a
+  request whose last additional record is a SIG (a copy, since a UDP buffer
+  goes back to the pool before the handler runs), and the handler gets it
+  from `w.(dns.RawRequester).RawRequest()`. Other requests are not copied and
+  get nil. Key lookup and trust stay in the application; the algorithm
+  registry (§1) applies as before, since the handler still calls
+  `(*SIG).Verify`. Upstream has no equivalent.
+
 ---
 
 ## Appending to this document
