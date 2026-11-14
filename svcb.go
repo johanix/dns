@@ -866,9 +866,10 @@ func (*SVCBOhttp) parse(b string) error {
 // transport. The per-transport weights are independent capability estimates,
 // not a distribution across transports.
 //
-// The codec carries Weight as the octet it received: a decoded weight above
-// 100 stays above 100 and is encoded again unchanged. Reading such a weight as
-// 100 is the consumer's job.
+// The codec carries Weight as the whole octet, 0 to 255, on the wire and in
+// presentation format alike: a weight above 100 stays above 100 through
+// unpack, String, parse and pack. Limiting weights to 100 is the job of the
+// publisher (never write more) and of the consumer (read more as 100).
 type SVCBOotsEntry struct {
 	Proto  string
 	Weight uint8
@@ -889,12 +890,14 @@ type SVCBOotsEntry struct {
 // String, whether or not it knows the identifier, and it keeps the weight octet
 // as received. Decoding and encoding a value again yields the same bytes, so a
 // node that re-packs a record it did not author (a secondary, a signer, a
-// cache) keeps its RRSIG valid. The draft says an unrecognized identifier is
+// cache) keeps its RRSIG valid, and whatever String writes, parse reads back
+// to the same value (a secondary that writes its zone to a file can load it
+// again). The draft says an unrecognized identifier is
 // ignored; that means a consumer does not act on it, never that it is dropped
 // when the record is written out again. Which identifiers a consumer acts on
 // ("do53", "dot", "doh" and "doq" in the draft as of this writing), and that a
-// weight octet above 100 reads as 100, are consumer rules this codec does not
-// apply.
+// weight above 100 reads as 100, are consumer rules this codec does not apply;
+// that a publisher writes no weight above 100 is the publisher's rule.
 //
 // Note on default interpretations (also a consumer rule, not enforced by this
 // codec): absence of a recognized entry means weight 0 for "dot", "doh" and
@@ -907,7 +910,7 @@ type SVCBOotsEntry struct {
 // as \DDD, and a comma, colon or backslash in an identifier is escaped twice,
 // as in an alpn value (RFC 9460, Appendix A.1), so that any identifier read off
 // the wire parses back to the same bytes. The weight is a decimal integer in
-// [0, 100]; parse refuses anything larger.
+// [0, 255], the whole octet; parse refuses anything else.
 //
 // Basic use pattern for creating an oots option:
 //
@@ -1053,11 +1056,14 @@ func (s *SVCBOots) parse(b string) error {
 		if !inWeight || len(proto) == 0 {
 			return errors.New("bad svcboots: entry is not proto:weight")
 		}
-		// weight is a decimal integer in the range [0, 100]; anything else
-		// (non-decimal, or out of range) is a parse error.
+		// weight is a decimal integer in [0, 255], the whole octet, so that
+		// a weight above 100 read off the wire and written out by String
+		// parses back. Anything else (non-decimal, or above 255) is a parse
+		// error. Limiting weights to 100 is for the publisher and the
+		// consumer, not the codec.
 		w, err := strconv.ParseUint(string(weight), 10, 8)
-		if err != nil || w > 100 {
-			return errors.New("bad svcboots: weight is not a decimal integer in [0, 100]")
+		if err != nil {
+			return errors.New("bad svcboots: weight is not a decimal integer in [0, 255]")
 		}
 		// Each protocol identifier string MUST NOT appear more than once.
 		if seen[string(proto)] {
@@ -1093,7 +1099,7 @@ func (s *SVCBOots) parse(b string) error {
 				return errors.New("bad svcboots: bad escaped character")
 			}
 			if inWeight {
-				return errors.New("bad svcboots: weight is not a decimal integer in [0, 100]")
+				return errors.New("bad svcboots: weight is not a decimal integer in [0, 255]")
 			}
 			p += dq
 			proto = append(proto, dc)

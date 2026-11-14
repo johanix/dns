@@ -357,10 +357,12 @@ func TestSVCBOotsLossless(t *testing.T) {
 }
 
 // TestSVCBOotsWeight150 checks a raw weight octet of 150: wire -> struct ->
-// wire keeps it, and String shows it as received. Presentation-format parse
-// still refuses a weight above 100, so that text does not parse back.
+// wire keeps it, String shows it as received, and that text parses back, so
+// wire -> text -> wire and text -> wire -> text are both byte-identical. A
+// secondary that writes such a record to its zone file can load it again.
 func TestSVCBOotsWeight150(t *testing.T) {
 	wire := []byte{3, 'd', 'o', 't', 150, 3, 't', 'c', 'p', 30}
+	const text = "dot:150,tcp:30"
 	e := new(SVCBOots)
 	if err := e.unpack(wire); err != nil {
 		t.Fatalf("unpack: %v", err)
@@ -372,11 +374,60 @@ func TestSVCBOotsWeight150(t *testing.T) {
 	if !bytes.Equal(b, wire) {
 		t.Fatalf("wire -> struct -> wire = %v, want %v", b, wire)
 	}
-	if got, want := e.String(), "dot:150,tcp:30"; got != want {
-		t.Fatalf("String() = %q, want %q", got, want)
+	if got := e.String(); got != text {
+		t.Fatalf("String() = %q, want %q", got, text)
 	}
-	if err := new(SVCBOots).parse(e.String()); err == nil {
-		t.Fatal("parse accepted a weight above 100")
+	// wire -> text -> wire
+	p := new(SVCBOots)
+	if err := p.parse(e.String()); err != nil {
+		t.Fatalf("parse(%q): %v", e.String(), err)
+	}
+	b2, err := p.pack()
+	if err != nil {
+		t.Fatalf("pack after parse: %v", err)
+	}
+	if !bytes.Equal(b2, wire) {
+		t.Fatalf("wire -> text -> wire = %v, want %v", b2, wire)
+	}
+	// text -> wire -> text
+	if got := p.String(); got != text {
+		t.Fatalf("text -> wire -> text = %q, want %q", got, text)
+	}
+	// The whole octet: 255 parses (256 is refused, in TestSVCBOotsParseErrors).
+	if err := new(SVCBOots).parse("dot:255"); err != nil {
+		t.Errorf("parse refused dot:255: %v", err)
+	}
+}
+
+// TestSVCBOotsWeight150InZone checks the case a secondary meets: a record
+// whose weight is 150 is written as zone-file text and read back by the zone
+// parser to the same wire bytes.
+func TestSVCBOotsWeight150InZone(t *testing.T) {
+	rr, err := NewRR(`_dns.foo.example. 300 IN SVCB 1 . oots="dot:150"`)
+	if err != nil {
+		t.Fatalf("NewRR(oots=\"dot:150\"): %v", err)
+	}
+	buf := make([]byte, Len(rr)+1)
+	off, err := PackRR(rr, buf, 0, nil, false)
+	if err != nil {
+		t.Fatalf("PackRR: %v", err)
+	}
+	wire := buf[:off]
+	rr2, _, err := UnpackRR(wire, 0)
+	if err != nil {
+		t.Fatalf("UnpackRR: %v", err)
+	}
+	rr3, err := NewRR(rr2.String())
+	if err != nil {
+		t.Fatalf("NewRR(%q): %v", rr2.String(), err)
+	}
+	buf3 := make([]byte, Len(rr3)+1)
+	off3, err := PackRR(rr3, buf3, 0, nil, false)
+	if err != nil {
+		t.Fatalf("PackRR again: %v", err)
+	}
+	if !bytes.Equal(buf3[:off3], wire) {
+		t.Fatalf("wire -> text -> wire changed:\n got %v\nwant %v", buf3[:off3], wire)
 	}
 }
 
@@ -535,8 +586,11 @@ func TestSVCBOotsParseErrors(t *testing.T) {
 		"do53",            // missing colon
 		"do53:",           // missing weight
 		"do53:x",          // non-decimal weight
-		"do53:101",        // weight out of range (> 100)
 		"do53:256",        // weight out of octet range
+		"do53:1000",       // weight out of octet range
+		"do53:-1",         // negative weight
+		"do53:+5",         // signed weight
+		"do53:0x10",       // not decimal
 		":100",            // empty protocol identifier
 		"do53:100,dot",    // second entry missing colon
 		"do53:100,,dot:5", // empty entry in the middle
@@ -545,7 +599,6 @@ func TestSVCBOotsParseErrors(t *testing.T) {
 		`a\\q:1`,          // value-list escape of a byte that needs none
 		`a\\`,             // unterminated value-list escape
 		`do53:1\\,`,       // value-list escape inside the weight
-		"tcp:150",         // a raw weight above 100 is not valid text
 	}
 	for _, in := range bad {
 		if err := new(SVCBOots).parse(in); err == nil {

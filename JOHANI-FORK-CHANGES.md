@@ -170,7 +170,8 @@ below corresponds to one logical change on that list.
   `svcbOotsKnownProtos` is removed. Tests in `svcb_test.go`:
   `TestSVCBOotsLossless`, `TestSVCBOotsWeight150`, `TestSVCBOotsRRLossless`,
   `TestSVCBOotsOnlyUnknownInMessage`, `TestSVCBOotsPackRefusesMalformed`,
-  `TestSVCBOotsOddIdentifierRoundTrip`, `TestSVCBOotsTrailingComma`;
+  `TestSVCBOotsOddIdentifierRoundTrip`, `TestSVCBOotsTrailingComma`,
+  `TestSVCBOotsWeight150InZone`;
   `TestSVCBOotsWeightClamp` and `TestSVCBOotsUnknownSkipped` become
   `TestSVCBOotsWeightRaw` and `TestSVCBOotsUnknownKept`.
 - **Why:** §4's codec dropped an identifier it did not know when it decoded,
@@ -186,8 +187,11 @@ below corresponds to one logical change on that list.
   - Still refused: a duplicate identifier, a zero-length identifier, an entry
     overflowing the value, and an empty value on decode. `pack` refuses an
     empty value and a duplicate, so it never writes what decoders refuse.
-  - `parse` still refuses a weight above 100, so a weight above 100 read off
-    the wire shows in `String` but does not parse back from text.
+  - `parse` accepts a decimal weight from 0 to 255, the whole octet, and
+    refuses anything else. Whatever `String` writes, `parse` reads back: a
+    secondary that receives a weight of 150 and writes its zone to a file can
+    load it again. Limiting weights to 100 is the publisher's and the
+    consumer's job, not the codec's.
   - `String` escapes an identifier byte outside printable ASCII as `\DDD` and
     a comma, colon or backslash twice, as alpn does (RFC 9460, Appendix A.1);
     `parse` reads those escapes. Identifiers of letters and digits read and
