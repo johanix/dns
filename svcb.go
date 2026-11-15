@@ -860,22 +860,16 @@ func (*SVCBOhttp) parse(b string) error {
 	return nil
 }
 
-// svcbOotsKnownProtos is the set of "oots" transport protocol identifiers
-// recognized by this implementation (draft-johani-dnsop-svcb-oots). An entry
-// whose identifier is not in this set is ignored on both decode and parse,
-// never treated as an error.
-var svcbOotsKnownProtos = map[string]bool{
-	"do53": true, // DNS over UDP/TCP (traditional, port 53)
-	"dot":  true, // DNS over TLS (RFC 7858)
-	"doh":  true, // DNS over HTTPS (RFC 8484)
-	"doq":  true, // DNS over QUIC (RFC 9250)
-}
-
 // SVCBOotsEntry is a single (proto, weight) entry of an "oots" SvcParamValue.
 // Weight is the operator's confidence, expressed as a percentage in the range
 // [0, 100], that it can serve the nameserver's total query load over the given
 // transport. The per-transport weights are independent capability estimates,
 // not a distribution across transports.
+//
+// The codec carries Weight as the whole octet, 0 to 255, on the wire and in
+// presentation format alike: a weight above 100 stays above 100 through
+// unpack, String, parse and pack. Limiting weights to 100 is the job of the
+// publisher (never write more) and of the consumer (read more as 100).
 type SVCBOotsEntry struct {
 	Proto  string
 	Weight uint8
@@ -889,17 +883,34 @@ type SVCBOotsEntry struct {
 //
 // The weights are independent capability estimates rather than a distribution:
 // more than one transport may carry a weight of 100, and the weights in a
-// single value typically sum to more than 100. Recognized protocol identifiers
-// are "do53", "dot", "doh" and "doq"; an entry with any other identifier is
-// ignored. Each identifier MUST appear at most once. The order of entries is
-// not significant.
+// single value typically sum to more than 100. Each identifier MUST appear at
+// most once. The order of entries is not significant, and the codec keeps it.
 //
-// Note on default interpretations (a consumer rule, not enforced by this
+// The codec is lossless. It keeps every entry through unpack, parse, pack and
+// String, whether or not it knows the identifier, and it keeps the weight octet
+// as received. Decoding and encoding a value again yields the same bytes, so a
+// node that re-packs a record it did not author (a secondary, a signer, a
+// cache) keeps its RRSIG valid, and whatever String writes, parse reads back
+// to the same value (a secondary that writes its zone to a file can load it
+// again). The draft says an unrecognized identifier is
+// ignored; that means a consumer does not act on it, never that it is dropped
+// when the record is written out again. Which identifiers a consumer acts on
+// ("do53", "dot", "doh" and "doq" in the draft as of this writing), and that a
+// weight above 100 reads as 100, are consumer rules this codec does not apply;
+// that a publisher writes no weight above 100 is the publisher's rule.
+//
+// Note on default interpretations (also a consumer rule, not enforced by this
 // codec): absence of a recognized entry means weight 0 for "dot", "doh" and
 // "doq", but weight 100 for "do53" (traditional DNS is assumed available unless
 // an explicit do53 entry with weight 0 says otherwise). Per the draft, an
 // "oots" value MUST also be ignored when it appears in an AliasMode SVCB record
 // (Priority == 0); that too is the caller's responsibility.
+//
+// In presentation format an identifier byte outside printable ASCII is written
+// as \DDD, and a comma, colon or backslash in an identifier is escaped twice,
+// as in an alpn value (RFC 9460, Appendix A.1), so that any identifier read off
+// the wire parses back to the same bytes. The weight is a decimal integer in
+// [0, 255], the whole octet; parse refuses anything else.
 //
 // Basic use pattern for creating an oots option:
 //
@@ -924,15 +935,53 @@ func (s *SVCBOots) len() int {
 }
 
 func (s *SVCBOots) String() string {
-	str := make([]string, len(s.Oots))
+	var str strings.Builder
 	for i, e := range s.Oots {
-		str[i] = e.Proto + ":" + strconv.FormatUint(uint64(e.Weight), 10)
+		// Worst case: every identifier byte escaped as \\\DDD, plus ':', up to
+		// three weight digits and the ',' separator.
+		str.Grow(5*len(e.Proto) + 5)
+		if i > 0 {
+			str.WriteByte(',')
+		}
+		for j := 0; j < len(e.Proto); j++ {
+			c := e.Proto[j]
+			if ' ' > c || c > '~' {
+				str.WriteString(escapeByte(c))
+				continue
+			}
+			switch c {
+			// Characters that would confuse the zone file parser get the
+			// ordinary presentation-format escape.
+			case '"', ';', ' ':
+				str.WriteByte('\\')
+				str.WriteByte(c)
+			// The separators and the backslash are escaped twice: `\\` for
+			// the value-list escape, then the octet itself as \DDD.
+			case ',':
+				str.WriteString(`\\\044`)
+			case ':':
+				str.WriteString(`\\\058`)
+			case '\\':
+				str.WriteString(`\\\092`)
+			default:
+				str.WriteByte(c)
+			}
+		}
+		str.WriteByte(':')
+		str.WriteString(strconv.FormatUint(uint64(e.Weight), 10))
 	}
-	return strings.Join(str, ",")
+	return str.String()
 }
 
 func (s *SVCBOots) pack() ([]byte, error) {
+	// The SvcParamValue contains at least one entry (N >= 1). An empty value
+	// is refused by every decoder, which fails the whole message, so never
+	// write one.
+	if len(s.Oots) == 0 {
+		return nil, errors.New("bad svcboots: value must contain at least one entry")
+	}
 	b := make([]byte, 0, s.len())
+	seen := make(map[string]bool, len(s.Oots))
 	for _, e := range s.Oots {
 		if e.Proto == "" {
 			return nil, errors.New("bad svcboots: empty protocol identifier")
@@ -940,15 +989,16 @@ func (s *SVCBOots) pack() ([]byte, error) {
 		if len(e.Proto) > 255 {
 			return nil, errors.New("bad svcboots: protocol identifier too long")
 		}
-		// An encoder MUST NOT emit a weight greater than 100; clamp rather than
-		// fail so a valid wire value is always produced.
-		w := e.Weight
-		if w > 100 {
-			w = 100
+		// A duplicate makes the value malformed for every decoder.
+		if seen[e.Proto] {
+			return nil, errors.New("bad svcboots: duplicate protocol identifier")
 		}
+		seen[e.Proto] = true
+		// The weight octet is written as held, so a value decoded off the
+		// wire packs back to the same bytes.
 		b = append(b, byte(len(e.Proto)))
 		b = append(b, e.Proto...)
-		b = append(b, w)
+		b = append(b, e.Weight)
 	}
 	return b, nil
 }
@@ -982,16 +1032,9 @@ func (s *SVCBOots) unpack(b []byte) error {
 			return errors.New("bad svcboots: duplicate protocol identifier")
 		}
 		seen[proto] = true
-		// An unrecognized identifier is ignored; the remaining entries are
-		// independent and continue to be processed.
-		if !svcbOotsKnownProtos[proto] {
-			continue
-		}
-		// A weight octet greater than 100 MUST be interpreted as 100; it is
-		// never grounds for treating the entry or the RR as malformed.
-		if weight > 100 {
-			weight = 100
-		}
+		// Every entry is kept, known identifier or not, with the weight
+		// octet as received: ignoring an entry, and reading a weight above
+		// 100 as 100, are for the consumer.
 		oots = append(oots, SVCBOotsEntry{Proto: proto, Weight: weight})
 	}
 	s.Oots = oots
@@ -1004,31 +1047,74 @@ func (s *SVCBOots) parse(b string) error {
 	}
 	oots := make([]SVCBOotsEntry, 0, strings.Count(b, ",")+1)
 	seen := make(map[string]bool)
-	for len(b) > 0 {
-		var entry string
-		entry, b, _ = strings.Cut(b, ",")
-		proto, weightStr, ok := strings.Cut(entry, ":")
-		// A malformed entry (missing colon, or an absent/empty protocol) is a
-		// parse error for the enclosing SvcParam.
-		if !ok || proto == "" {
+	var proto, weight []byte
+	inWeight := false
+	// finish closes the entry read so far.
+	finish := func() error {
+		// A malformed entry (missing colon, or an absent/empty protocol) is
+		// a parse error for the enclosing SvcParam.
+		if !inWeight || len(proto) == 0 {
 			return errors.New("bad svcboots: entry is not proto:weight")
 		}
-		// weight is a decimal integer in the range [0, 100]; anything else
-		// (non-decimal, or out of range) is a parse error.
-		weight, err := strconv.ParseUint(weightStr, 10, 8)
-		if err != nil || weight > 100 {
-			return errors.New("bad svcboots: weight is not a decimal integer in [0, 100]")
+		// weight is a decimal integer in [0, 255], the whole octet, so that
+		// a weight above 100 read off the wire and written out by String
+		// parses back. Anything else (non-decimal, or above 255) is a parse
+		// error. Limiting weights to 100 is for the publisher and the
+		// consumer, not the codec.
+		w, err := strconv.ParseUint(string(weight), 10, 8)
+		if err != nil {
+			return errors.New("bad svcboots: weight is not a decimal integer in [0, 255]")
 		}
 		// Each protocol identifier string MUST NOT appear more than once.
-		if seen[proto] {
+		if seen[string(proto)] {
 			return errors.New("bad svcboots: duplicate protocol identifier")
 		}
-		seen[proto] = true
-		// An unrecognized identifier is ignored; processing continues.
-		if !svcbOotsKnownProtos[proto] {
-			continue
+		seen[string(proto)] = true
+		// Every entry is kept, known identifier or not.
+		oots = append(oots, SVCBOotsEntry{Proto: string(proto), Weight: uint8(w)})
+		proto, weight, inWeight = nil, nil, false
+		return nil
+	}
+	for p := 0; p < len(b); {
+		c, q := nextByte(b, p)
+		if q == 0 {
+			return errors.New("bad svcboots: unterminated escape")
 		}
-		oots = append(oots, SVCBOotsEntry{Proto: proto, Weight: uint8(weight)})
+		p += q
+		switch {
+		case c == ',':
+			if err := finish(); err != nil {
+				return err
+			}
+		case c == ':' && !inWeight:
+			inWeight = true
+		case c == '\\':
+			// Value-list escape: the next byte is a literal comma, colon
+			// or backslash in the identifier.
+			dc, dq := nextByte(b, p)
+			if dq == 0 {
+				return errors.New("bad svcboots: unterminated escape")
+			}
+			if dc != '\\' && dc != ',' && dc != ':' {
+				return errors.New("bad svcboots: bad escaped character")
+			}
+			if inWeight {
+				return errors.New("bad svcboots: weight is not a decimal integer in [0, 255]")
+			}
+			p += dq
+			proto = append(proto, dc)
+		case inWeight:
+			weight = append(weight, c)
+		default:
+			proto = append(proto, c)
+		}
+	}
+	// A single trailing comma was accepted before the codec became lossless,
+	// and still is; any other empty entry is an error.
+	if len(proto) > 0 || inWeight || len(oots) == 0 {
+		if err := finish(); err != nil {
+			return err
+		}
 	}
 	s.Oots = oots
 	return nil

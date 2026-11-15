@@ -102,6 +102,8 @@ below corresponds to one logical change on that list.
   `oots="proto:weight[,proto:weight]*"` with insignificant order. The
   absence-default rules (`do53` → 100, others → 0) and "ignore in AliasMode" are
   consumer rules and are documented on `SVCBOots` but not enforced by the codec.
+- **Superseded in part by §8:** the codec no longer drops unrecognized
+  identifiers or clamps weights; both became consumer rules.
 
 ## 5. RSAMD5 key tag: no panic on a key shorter than three bytes
 
@@ -158,6 +160,42 @@ below corresponds to one logical change on that list.
   get nil. Key lookup and trust stay in the application; the algorithm
   registry (§1) applies as before, since the handler still calls
   `(*SIG).Verify`. Upstream has no equivalent.
+
+## 8. `oots`: a lossless codec
+
+- **Implemented:** 2026-11-14
+- **Commits:** see PR (to be released as `v1.1.72-johanix.6`)
+- **Files / symbols:** `svcb.go`: `SVCBOots` `unpack` / `parse` / `pack` /
+  `String` and the type's doc comment; the recognized-protocol set
+  `svcbOotsKnownProtos` is removed. Tests in `svcb_test.go`:
+  `TestSVCBOotsLossless`, `TestSVCBOotsWeight150`, `TestSVCBOotsRRLossless`,
+  `TestSVCBOotsOnlyUnknownInMessage`, `TestSVCBOotsPackRefusesMalformed`,
+  `TestSVCBOotsOddIdentifierRoundTrip`, `TestSVCBOotsTrailingComma`,
+  `TestSVCBOotsWeight150InZone`;
+  `TestSVCBOotsWeightClamp` and `TestSVCBOotsUnknownSkipped` become
+  `TestSVCBOotsWeightRaw` and `TestSVCBOotsUnknownKept`.
+- **Why:** §4's codec dropped an identifier it did not know when it decoded,
+  and clamped a weight above 100. A node that decodes and packs a record again
+  (a secondary, a signer, a cache, an application injecting the record into a
+  response) then served other bytes than it received, so the RRSIG over the
+  original no longer matched. A record holding only unknown identifiers packed
+  as an empty value, which every decoder refuses, failing the whole message.
+  New identifiers could not be published while any such node remained. Now:
+  - `unpack` and `parse` keep every entry, known identifier or not, in order;
+    `unpack` and `pack` carry the weight octet as received. Which identifiers
+    to act on, and reading a weight above 100 as 100, are the consumer's job.
+  - Still refused: a duplicate identifier, a zero-length identifier, an entry
+    overflowing the value, and an empty value on decode. `pack` refuses an
+    empty value and a duplicate, so it never writes what decoders refuse.
+  - `parse` accepts a decimal weight from 0 to 255, the whole octet, and
+    refuses anything else. Whatever `String` writes, `parse` reads back: a
+    secondary that receives a weight of 150 and writes its zone to a file can
+    load it again. Limiting weights to 100 is the publisher's and the
+    consumer's job, not the codec's.
+  - `String` escapes an identifier byte outside printable ASCII as `\DDD` and
+    a comma, colon or backslash twice, as alpn does (RFC 9460, Appendix A.1);
+    `parse` reads those escapes. Identifiers of letters and digits read and
+    print as before. A single trailing comma is still accepted.
 
 ---
 

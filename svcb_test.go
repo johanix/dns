@@ -1,6 +1,8 @@
 package dns
 
 import (
+	"bytes"
+	"net"
 	"testing"
 )
 
@@ -233,18 +235,26 @@ func TestSVCBOotsPresentationRoundTrip(t *testing.T) {
 	}
 }
 
-// TestSVCBOotsWeightClamp checks that a wire weight octet greater than 100 is
-// clamped to 100 on unpack, and that the entry/RR is not treated as malformed.
-func TestSVCBOotsWeightClamp(t *testing.T) {
+// TestSVCBOotsWeightRaw checks that a wire weight octet greater than 100 is
+// kept as received by unpack and written back unchanged by pack, and that the
+// entry/RR is not treated as malformed. Reading it as 100 is the consumer's job.
+func TestSVCBOotsWeightRaw(t *testing.T) {
 	// do53 with weight octet 200 (> 100) and dot with the max 255.
 	wire := []byte{4, 'd', 'o', '5', '3', 200, 3, 'd', 'o', 't', 255}
 	e := new(SVCBOots)
 	if err := e.unpack(wire); err != nil {
-		t.Fatalf("unpack rejected a >100 weight, must clamp instead: %v", err)
+		t.Fatalf("unpack rejected a >100 weight: %v", err)
 	}
-	want := []SVCBOotsEntry{{Proto: "do53", Weight: 100}, {Proto: "dot", Weight: 100}}
+	want := []SVCBOotsEntry{{Proto: "do53", Weight: 200}, {Proto: "dot", Weight: 255}}
 	if !ootsEqual(e.Oots, want) {
-		t.Fatalf("weight not clamped: got %v, want %v", e.Oots, want)
+		t.Fatalf("weight not kept as received: got %v, want %v", e.Oots, want)
+	}
+	b, err := e.pack()
+	if err != nil {
+		t.Fatalf("pack failed: %v", err)
+	}
+	if !bytes.Equal(b, wire) {
+		t.Fatalf("pack changed the weight octets: got %v, want %v", b, wire)
 	}
 }
 
@@ -260,19 +270,19 @@ func TestSVCBOotsDuplicateRejected(t *testing.T) {
 	}
 }
 
-// TestSVCBOotsUnknownSkipped checks that an unrecognized protocol identifier is
-// ignored (not an error) while recognized entries are retained, on both the
-// wire and presentation paths.
-func TestSVCBOotsUnknownSkipped(t *testing.T) {
+// TestSVCBOotsUnknownKept checks that an unrecognized protocol identifier is
+// kept (not an error, not dropped) beside the recognized entries, in order, on
+// both the wire and presentation paths.
+func TestSVCBOotsUnknownKept(t *testing.T) {
 	// "xyz":9 (unknown) between do53:100 and doq:7 (both known).
 	wire := []byte{4, 'd', 'o', '5', '3', 100, 3, 'x', 'y', 'z', 9, 3, 'd', 'o', 'q', 7}
 	e := new(SVCBOots)
 	if err := e.unpack(wire); err != nil {
 		t.Fatalf("unpack failed on unknown proto: %v", err)
 	}
-	want := []SVCBOotsEntry{{Proto: "do53", Weight: 100}, {Proto: "doq", Weight: 7}}
+	want := []SVCBOotsEntry{{Proto: "do53", Weight: 100}, {Proto: "xyz", Weight: 9}, {Proto: "doq", Weight: 7}}
 	if !ootsEqual(e.Oots, want) {
-		t.Fatalf("unknown proto not skipped on unpack: got %v, want %v", e.Oots, want)
+		t.Fatalf("unknown proto not kept on unpack: got %v, want %v", e.Oots, want)
 	}
 
 	p := new(SVCBOots)
@@ -280,7 +290,269 @@ func TestSVCBOotsUnknownSkipped(t *testing.T) {
 		t.Fatalf("parse failed on unknown proto: %v", err)
 	}
 	if !ootsEqual(p.Oots, want) {
-		t.Fatalf("unknown proto not skipped on parse: got %v, want %v", p.Oots, want)
+		t.Fatalf("unknown proto not kept on parse: got %v, want %v", p.Oots, want)
+	}
+}
+
+// TestSVCBOotsLossless checks that the codec is lossless: text -> wire -> text
+// and wire -> struct -> wire both give back the same bytes, for known tokens,
+// unknown tokens mixed with known ones, and only unknown tokens.
+func TestSVCBOotsLossless(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+		wire []byte
+	}{
+		{
+			name: "known",
+			text: "do53:100,dot:5,doq:5",
+			wire: []byte{4, 'd', 'o', '5', '3', 100, 3, 'd', 'o', 't', 5, 3, 'd', 'o', 'q', 5},
+		},
+		{
+			name: "mixed",
+			text: "udp:100,dot:5,tcp:30,xyz:0",
+			wire: []byte{3, 'u', 'd', 'p', 100, 3, 'd', 'o', 't', 5, 3, 't', 'c', 'p', 30, 3, 'x', 'y', 'z', 0},
+		},
+		{
+			name: "only-unknown",
+			text: "tcp:30",
+			wire: []byte{3, 't', 'c', 'p', 30},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// text -> wire -> text
+			p := new(SVCBOots)
+			if err := p.parse(tc.text); err != nil {
+				t.Fatalf("parse(%q): %v", tc.text, err)
+			}
+			b, err := p.pack()
+			if err != nil {
+				t.Fatalf("pack: %v", err)
+			}
+			if !bytes.Equal(b, tc.wire) {
+				t.Fatalf("parse+pack = %v, want %v", b, tc.wire)
+			}
+			u := new(SVCBOots)
+			if err := u.unpack(b); err != nil {
+				t.Fatalf("unpack: %v", err)
+			}
+			if got := u.String(); got != tc.text {
+				t.Fatalf("text -> wire -> text = %q, want %q", got, tc.text)
+			}
+			// wire -> struct -> wire
+			w := new(SVCBOots)
+			if err := w.unpack(tc.wire); err != nil {
+				t.Fatalf("unpack: %v", err)
+			}
+			b2, err := w.pack()
+			if err != nil {
+				t.Fatalf("pack: %v", err)
+			}
+			if !bytes.Equal(b2, tc.wire) {
+				t.Fatalf("wire -> struct -> wire = %v, want %v", b2, tc.wire)
+			}
+		})
+	}
+}
+
+// TestSVCBOotsWeight150 checks a raw weight octet of 150: wire -> struct ->
+// wire keeps it, String shows it as received, and that text parses back, so
+// wire -> text -> wire and text -> wire -> text are both byte-identical. A
+// secondary that writes such a record to its zone file can load it again.
+func TestSVCBOotsWeight150(t *testing.T) {
+	wire := []byte{3, 'd', 'o', 't', 150, 3, 't', 'c', 'p', 30}
+	const text = "dot:150,tcp:30"
+	e := new(SVCBOots)
+	if err := e.unpack(wire); err != nil {
+		t.Fatalf("unpack: %v", err)
+	}
+	b, err := e.pack()
+	if err != nil {
+		t.Fatalf("pack: %v", err)
+	}
+	if !bytes.Equal(b, wire) {
+		t.Fatalf("wire -> struct -> wire = %v, want %v", b, wire)
+	}
+	if got := e.String(); got != text {
+		t.Fatalf("String() = %q, want %q", got, text)
+	}
+	// wire -> text -> wire
+	p := new(SVCBOots)
+	if err := p.parse(e.String()); err != nil {
+		t.Fatalf("parse(%q): %v", e.String(), err)
+	}
+	b2, err := p.pack()
+	if err != nil {
+		t.Fatalf("pack after parse: %v", err)
+	}
+	if !bytes.Equal(b2, wire) {
+		t.Fatalf("wire -> text -> wire = %v, want %v", b2, wire)
+	}
+	// text -> wire -> text
+	if got := p.String(); got != text {
+		t.Fatalf("text -> wire -> text = %q, want %q", got, text)
+	}
+	// The whole octet: 255 parses (256 is refused, in TestSVCBOotsParseErrors).
+	if err := new(SVCBOots).parse("dot:255"); err != nil {
+		t.Errorf("parse refused dot:255: %v", err)
+	}
+}
+
+// TestSVCBOotsWeight150InZone checks the case a secondary meets: a record
+// whose weight is 150 is written as zone-file text and read back by the zone
+// parser to the same wire bytes.
+func TestSVCBOotsWeight150InZone(t *testing.T) {
+	rr, err := NewRR(`_dns.foo.example. 300 IN SVCB 1 . oots="dot:150"`)
+	if err != nil {
+		t.Fatalf("NewRR(oots=\"dot:150\"): %v", err)
+	}
+	buf := make([]byte, Len(rr)+1)
+	off, err := PackRR(rr, buf, 0, nil, false)
+	if err != nil {
+		t.Fatalf("PackRR: %v", err)
+	}
+	wire := buf[:off]
+	rr2, _, err := UnpackRR(wire, 0)
+	if err != nil {
+		t.Fatalf("UnpackRR: %v", err)
+	}
+	rr3, err := NewRR(rr2.String())
+	if err != nil {
+		t.Fatalf("NewRR(%q): %v", rr2.String(), err)
+	}
+	buf3 := make([]byte, Len(rr3)+1)
+	off3, err := PackRR(rr3, buf3, 0, nil, false)
+	if err != nil {
+		t.Fatalf("PackRR again: %v", err)
+	}
+	if !bytes.Equal(buf3[:off3], wire) {
+		t.Fatalf("wire -> text -> wire changed:\n got %v\nwant %v", buf3[:off3], wire)
+	}
+}
+
+// TestSVCBOotsRRLossless checks whole SVCB records: the presentation form
+// survives NewRR -> PackRR -> UnpackRR -> String unchanged, and the wire form
+// survives UnpackRR -> PackRR unchanged, including a record whose only oots
+// entry is a token this codec does not know.
+func TestSVCBOotsRRLossless(t *testing.T) {
+	for _, zone := range []string{
+		"_dns.foo.example.\t300\tIN\tSVCB\t1 . oots=\"do53:100,dot:5,doq:5\"",
+		"_dns.foo.example.\t300\tIN\tSVCB\t1 . port=\"1234\" oots=\"do53:100,tcp:30,dot:5,xyz:9\"",
+		"_dns.foo.example.\t300\tIN\tSVCB\t1 tcp-foo.example. oots=\"tcp:30\"",
+	} {
+		rr, err := NewRR(zone)
+		if err != nil {
+			t.Fatalf("NewRR(%q): %v", zone, err)
+		}
+		if rr.String() != zone {
+			t.Fatalf("String() = %q, want %q", rr.String(), zone)
+		}
+		buf := make([]byte, Len(rr)+1)
+		off, err := PackRR(rr, buf, 0, nil, false)
+		if err != nil {
+			t.Fatalf("PackRR(%q): %v", zone, err)
+		}
+		wire := buf[:off]
+		rr2, _, err := UnpackRR(wire, 0)
+		if err != nil {
+			t.Fatalf("UnpackRR(%q): %v", zone, err)
+		}
+		if rr2.String() != zone {
+			t.Fatalf("text -> wire -> text = %q, want %q", rr2.String(), zone)
+		}
+		buf2 := make([]byte, Len(rr2)+1)
+		off2, err := PackRR(rr2, buf2, 0, nil, false)
+		if err != nil {
+			t.Fatalf("PackRR again(%q): %v", zone, err)
+		}
+		if !bytes.Equal(buf2[:off2], wire) {
+			t.Fatalf("wire -> struct -> wire changed %q:\n got %v\nwant %v", zone, buf2[:off2], wire)
+		}
+	}
+}
+
+// TestSVCBOotsOnlyUnknownInMessage checks that a message carrying a record
+// whose only oots entry is unknown to this codec unpacks, and packs again to
+// the same bytes. Before the codec was lossless such a record re-packed as an
+// empty value, which every decoder refuses, failing the whole message.
+func TestSVCBOotsOnlyUnknownInMessage(t *testing.T) {
+	rr, err := NewRR(`_dns.foo.example. 300 IN SVCB 1 tcp-foo.example. oots="tcp:30"`)
+	if err != nil {
+		t.Fatalf("NewRR: %v", err)
+	}
+	m := new(Msg)
+	m.SetQuestion("foo.example.", TypeA)
+	m.Response = true
+	m.Answer = []RR{&A{Hdr: RR_Header{Name: "foo.example.", Rrtype: TypeA, Class: ClassINET, Ttl: 300}, A: net.IPv4(192, 0, 2, 1)}}
+	m.Extra = []RR{rr}
+	wire, err := m.Pack()
+	if err != nil {
+		t.Fatalf("Pack: %v", err)
+	}
+	m2 := new(Msg)
+	if err := m2.Unpack(wire); err != nil {
+		t.Fatalf("Unpack of a message with an only-unknown oots record: %v", err)
+	}
+	if len(m2.Answer) != 1 || len(m2.Extra) != 1 {
+		t.Fatalf("got %d answers and %d additionals, want 1 and 1", len(m2.Answer), len(m2.Extra))
+	}
+	wire2, err := m2.Pack()
+	if err != nil {
+		t.Fatalf("Pack again: %v", err)
+	}
+	if !bytes.Equal(wire, wire2) {
+		t.Fatal("message changed on unpack and pack")
+	}
+}
+
+// TestSVCBOotsPackRefusesMalformed checks that pack never writes a value that
+// every decoder would refuse: an empty value, or a duplicate identifier.
+func TestSVCBOotsPackRefusesMalformed(t *testing.T) {
+	if _, err := (&SVCBOots{}).pack(); err == nil {
+		t.Error("pack wrote an empty value")
+	}
+	if _, err := (&SVCBOots{Oots: []SVCBOotsEntry{}}).pack(); err == nil {
+		t.Error("pack wrote an empty value from an empty slice")
+	}
+	dup := &SVCBOots{Oots: []SVCBOotsEntry{{Proto: "tcp", Weight: 1}, {Proto: "tcp", Weight: 2}}}
+	if _, err := dup.pack(); err == nil {
+		t.Error("pack wrote a duplicate identifier")
+	}
+	if _, err := (&SVCBOots{Oots: []SVCBOotsEntry{{Proto: "", Weight: 1}}}).pack(); err == nil {
+		t.Error("pack wrote an empty identifier")
+	}
+}
+
+// TestSVCBOotsOddIdentifierRoundTrip checks that an identifier with bytes the
+// presentation format has to escape (separators, backslash, quote, space,
+// non-printable octets) survives wire -> text -> wire through a whole record.
+func TestSVCBOotsOddIdentifierRoundTrip(t *testing.T) {
+	protos := []string{"a,b", "x:y", `back\slash`, `q"uote`, "sp ace", "semi;colon", "\x00\x7f\xff", "tcp"}
+	in := &SVCBOots{}
+	for i, p := range protos {
+		in.Oots = append(in.Oots, SVCBOotsEntry{Proto: p, Weight: uint8(i * 10)})
+	}
+	rr := &SVCB{
+		Hdr:      RR_Header{Name: "_dns.foo.example.", Rrtype: TypeSVCB, Class: ClassINET, Ttl: 300},
+		Priority: 1,
+		Target:   ".",
+		Value:    []SVCBKeyValue{in},
+	}
+	want, err := in.pack()
+	if err != nil {
+		t.Fatalf("pack: %v", err)
+	}
+	rr2, err := NewRR(rr.String())
+	if err != nil {
+		t.Fatalf("NewRR(%q): %v", rr.String(), err)
+	}
+	got, err := rr2.(*SVCB).Value[0].pack()
+	if err != nil {
+		t.Fatalf("pack after parse: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("wire -> text -> wire changed the value via %q:\n got %v\nwant %v", rr.String(), got, want)
 	}
 }
 
@@ -310,14 +582,23 @@ func TestSVCBOotsOrderInsensitive(t *testing.T) {
 // errors, and that an empty value is rejected.
 func TestSVCBOotsParseErrors(t *testing.T) {
 	bad := []string{
-		"",             // no entries at all
-		"do53",         // missing colon
-		"do53:",        // missing weight
-		"do53:x",       // non-decimal weight
-		"do53:101",     // weight out of range (> 100)
-		"do53:256",     // weight out of octet range
-		":100",         // empty protocol identifier
-		"do53:100,dot", // second entry missing colon
+		"",                // no entries at all
+		"do53",            // missing colon
+		"do53:",           // missing weight
+		"do53:x",          // non-decimal weight
+		"do53:256",        // weight out of octet range
+		"do53:1000",       // weight out of octet range
+		"do53:-1",         // negative weight
+		"do53:+5",         // signed weight
+		"do53:0x10",       // not decimal
+		":100",            // empty protocol identifier
+		"do53:100,dot",    // second entry missing colon
+		"do53:100,,dot:5", // empty entry in the middle
+		",do53:100",       // empty first entry
+		"do53:1:2",        // second colon in the weight
+		`a\\q:1`,          // value-list escape of a byte that needs none
+		`a\\`,             // unterminated value-list escape
+		`do53:1\\,`,       // value-list escape inside the weight
 	}
 	for _, in := range bad {
 		if err := new(SVCBOots).parse(in); err == nil {
@@ -370,5 +651,18 @@ func TestSVCBOotsCopy(t *testing.T) {
 	cp.Oots[0].Weight = 1
 	if orig.Oots[0].Weight != 100 {
 		t.Fatal("copy() did not deep-copy the entry slice")
+	}
+}
+
+// TestSVCBOotsTrailingComma checks that a single trailing comma is still
+// accepted, as it was before the codec became lossless.
+func TestSVCBOotsTrailingComma(t *testing.T) {
+	e := new(SVCBOots)
+	if err := e.parse("do53:100,tcp:30,"); err != nil {
+		t.Fatalf("parse refused a trailing comma: %v", err)
+	}
+	want := []SVCBOotsEntry{{Proto: "do53", Weight: 100}, {Proto: "tcp", Weight: 30}}
+	if !ootsEqual(e.Oots, want) {
+		t.Fatalf("got %v, want %v", e.Oots, want)
 	}
 }
